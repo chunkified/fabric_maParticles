@@ -1,0 +1,168 @@
+/*
+  WIP class for a flexible particle system in Fabric
+  Note that most, if not all, of this may, will or has to change.
+  If you make enhancements to this (like deleting and rewriting it from scratch),
+  please inform malbrecht@marc-albrecht.de
+*/
+
+/// \cond
+require Math,Geometry,Points;
+/// \endcond
+
+/**
+ global particle simulation variables and, eventually, functions
+*/
+struct maParticleSimulation
+{
+  Boolean active; // global activation state to allow "freeze" states
+  Points PointCloud; // the actual points container, to avoid having to pass both this sim and the points pointer along
+  Vec3 position; // initial position of newly created particles (do we need this?)
+  Vec3 gravity; // direction and strength (in m/s^2) of gravity
+  Float32 mass; // initial mass for new particles in kg (should this be weight in Newton?)
+  Size clusters; // number of segments per axis to limit neighborhood searches ("octree mokup"), the actual amount of clusters is this value^3 (three axises)
+  UInt32 cluster[][]; // Array of arrays of particle IDs. Note that a particle (ID) can get listed in more than one cluster, if it is less than "influence" away from the respective border
+  Float32 framespersecond; // helper for simple access to frames resolution
+  Float32 currenttime; // current time as FP (not frame)
+  Vec3 farest; // position of the farest particle in this simulation, used to update the clusters
+  }; 
+
+
+
+/**
+ funtcion to check for an attribute being available in a point cloud, currently not used
+*/ 
+function Boolean maParticleHasAttribute(maParticleSimulation sim,String name)
+{
+ return(true);
+}
+
+/**
+ Inits clusters for faster position/collision checks - WIP, don't use or if you do, post bug fixes please
+*/
+function maParticleInitClusters(io maParticleSimulation sim)
+{
+  Size clusters=sim.clusters;
+  if(sim.cluster.size()>0) 
+    {
+    Size m=sim.cluster.size();
+    for(Size i=0;i<m;i++)
+      {
+      sim.cluster[i].resize(0);
+      } // i, delete all clusters
+    } // sim.cluster.size() > 0
+  sim.cluster.resize(clusters*clusters*clusters);      // TO DO: set up initial states of clusters, set attribute on point cloud to set "home cluster" on each particle
+}
+
+/**
+ Initilize simulation, set default parameters to default values, see struct comments for purposes
+ Note that currently some standard attributes are created that may not get used after all, so may be this should be optional?
+*/
+
+function maParticleSimulation maParticleSimulationInit(io Points PointCloud,Boolean active,Vec3 defPosition,Vec3 gravity,Float32 defMass,Size defClusters,Float32 fps)
+{
+  maParticleSimulation sim;
+  sim.PointCloud=PointCloud;
+  sim.active=active;
+  sim.position=defPosition;
+  sim.gravity=gravity;
+  sim.mass=defMass;
+  sim.clusters=defClusters;
+  sim.framespersecond=fps;
+  if(fps==0.0) sim.framespersecond=25.0;
+  maParticleInitClusters(sim);
+
+  Ref<GeometryAttributes> attributes = PointCloud.getAttributes();
+  
+  attributes.getOrCreateVec3Attribute("scaling");
+  attributes.getOrCreateVec3Attribute("velocity");
+  attributes.getOrCreateIntegerAttribute("active");
+  attributes.getOrCreateQuatAttribute("rotation");
+  attributes.getOrCreateScalarAttribute("mass");
+  attributes.getOrCreateScalarAttribute("attraction");
+  attributes.getOrCreateScalarAttribute("influence");
+  attributes.getOrCreateScalarAttribute("temperature");
+  attributes.getOrCreateScalarAttribute("cooling");
+  attributes.getOrCreateIntegerAttribute("age");
+  attributes.getOrCreateIntegerAttribute("cluster"); // "home" cluster, may be listed in more than one though
+  return(sim);
+}
+
+
+/**
+ Experimental "radial" emitter (result is more boxy, though - why?)
+  TODO: Emitters should get an "activate" property to allow for timed emission
+  TODO: SHOULD emitters be allowed to add particles over more than a single frame?
+  NOTE: In the experimental scene, the emitter is called ONCE on init (frame 1.0), so only ONE bunch of particles is created!
+  TODO: Check if constant emission works in the first place ...  
+*/
+function maParticleRadialEmitter(io maParticleSimulation sim,UInt32 count,Vec3 position,Float32 velocitymin,Float32 velocitymax)
+{
+  Points p=sim.PointCloud;
+  UInt32 firstnew=p.size();
+  Ref<GeometryAttributes> attributes = sim.PointCloud.getAttributes();
+
+  Vec3 ipos=sim.position;
+  sim.PointCloud.resize(firstnew+count);                     // respect existing points, so a radial emitter can ADD points to an existing simulation or several emitters can be combined
+  sim.PointCloud.getOrCreateSizesAttribute();           // needed for displaying points in debug shape(?)
+  
+  for(Size i=0;i<count;i++)                   // TODO: Should this be PEXed?
+    {
+    sim.PointCloud.setPosition(firstnew+i,position+ipos);
+    sim.PointCloud.setSize(firstnew+i,1.0);
+    if(maParticleHasAttribute(sim,"velocity"))
+      {
+      Vec3Attribute vel=attributes.getAttribute("velocity",Vec3Attribute);
+      vel.values[firstnew+i].x=velocitymin+(velocitymax-velocitymin)*mathRandomFloat32(sim.currenttime,i*4);
+      vel.values[firstnew+i].y=velocitymin+(velocitymax-velocitymin)*mathRandomFloat32(sim.currenttime,i*4+1);
+      vel.values[firstnew+i].z=velocitymin+(velocitymax-velocitymin)*mathRandomFloat32(sim.currenttime,i*4+2);
+      IntegerAttribute ac=attributes.getAttribute("active",IntegerAttribute);
+      ac.values[firstnew+i]=1;
+      
+       }
+    
+    } // for i < count
+}
+
+
+/**
+ PEX operator for the default "simple solver", add particle velocity, position and simulation's gravity, store values back 
+*/
+operator maPartDefSolve<<<index>>>(io maParticleSimulation sim)
+{
+  Points p=sim.PointCloud;
+  Size ps=p.size();
+  Ref<GeometryAttributes> attributes = sim.PointCloud.getAttributes();
+  
+  Vec3Attribute vel=attributes.getAttribute("velocity",Vec3Attribute);
+  IntegerAttribute pa=attributes.getAttribute("active",IntegerAttribute);
+  if(pa.values[index]==0) return; // particle inactive
+  
+    Float32 fps=sim.framespersecond;
+    Vec3 pos=sim.PointCloud.getPosition(index);
+    Vec3 v=vel.values[index] / fps;
+    Vec3 g=sim.gravity / fps;
+    sim.PointCloud.setPosition(index,pos+v+g);
+    vel.values[index]=vel.values[index]+g;
+
+}
+
+
+/**
+ "Simple Solver", currently only adds gravity + velocity, stores values back
+ NOTE: this solver updates the simulation's currenttime, which should only be done ONCE, obviously
+ TODO: Find proper way to only update sim's currenttime ONCE, no matter how many solvers are involved!
+ NOTE: Solvers have to increase attribuesValueVersion!
+*/
+
+function maParticleDefaultSolver(io maParticleSimulation sim)
+{
+  sim.currenttime+=1/sim.framespersecond;
+  if(!sim.active) return; // simulation inactive
+  Points p=sim.PointCloud;
+  Size ps=p.size();
+
+  maPartDefSolve<<<ps>>>(sim);
+  Ref<GeometryAttributes> attributes = sim.PointCloud.getAttributes();
+  attributes.attributesValueVersion++;
+  
+}
